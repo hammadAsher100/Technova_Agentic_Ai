@@ -1,0 +1,59 @@
+# ==============================================================================
+# Runtime dependencies for the agent itself: INTENTIONALLY EMPTY.
+#
+# READ THIS BEFORE ADDING ANYTHING ABOVE THE "dev tooling" LINE BELOW.
+#
+# REG-02 requires the agent to run on Python 3.9+ and assumes the judging
+# environment may only have 3.9. During Phase 0 planning every dependency
+# the original spec asked for was checked against live PyPI metadata.
+# Confidence varies by package (see docs/ARCHITECTURE.md, "Dependency
+# strategy" for the full table and exactly what was directly confirmed
+# vs. inferred), but the bottom line for all of them is the same:
+#
+#   groq          -> official README/PyPI state a Python >=3.10 floor directly
+#   mistralai     -> PyPI confirms Python >=3.10 directly (v2.x; v1.x was lower)
+#   tenacity      -> PyPI confirms Python >=3.10 directly
+#   requests      -> PyPI confirms Python >=3.10 directly, and its own
+#                    changelog says so: dropped Python 3.9 after its EOL
+#   google-genai  -> its OWN metadata was ambiguous across sources, but it
+#                    depends on requests + tenacity, both confirmed >=3.10
+#                    above, so it cannot resolve cleanly on 3.9 either way
+#
+# Pinning old pre-drop releases instead was considered and rejected: doing
+# that correctly means knowing the exact last 3.9-compatible version per
+# package, which could not be verified with confidence from here, and it
+# would leave the team depending on unmaintained branches during a live
+# competition.
+#
+# Instead, agent/ and config/ are written against the Python 3.9 standard
+# library only: urllib.request for HTTP, a ~15-line .env parser in
+# config/settings.py, hand-rolled deadline-aware retry/fallback logic in
+# agent/model_router.py (which a generic decorator like tenacity couldn't
+# do correctly here anyway — see docs/ARCHITECTURE.md). Zero runtime
+# dependencies means zero risk of `pip install` failing on the judges'
+# machine.
+#
+# UPGRADE PATH: if your team CONFIRMS the judging environment is Python
+# 3.10+, uncomment what you need below and swap the corresponding
+# client in agent/providers/ to use the SDK instead of raw HTTP. Each
+# provider client is a self-contained file behind the same
+# BaseProviderClient interface (agent/providers/base.py) — a contained,
+# single-file change per provider, not a rewrite. Re-verify exact
+# version numbers against PyPI yourself before pinning; none are pinned
+# here on purpose, since this environment could not fully verify every
+# one directly (see table above / docs/ARCHITECTURE.md).
+# ==============================================================================
+
+# --- OPTIONAL — only if judging Python is confirmed >=3.10 ---
+# groq
+# google-genai
+# mistralai
+# tenacity
+# requests
+# python-dotenv
+
+# --- Dev / test tooling (runs on the TEAM's machines, not the judged
+#     agent process — REG-02's 3.9 floor does not apply to this line) ---
+pytest>=7.4,<9.0
+python-dotenv>=1.0.0
+rich>=13.0.0
