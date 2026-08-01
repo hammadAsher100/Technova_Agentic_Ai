@@ -26,6 +26,7 @@ phrasing. That's a correct property to document, not a gap to hide.
 """
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import List, Sequence
 
@@ -87,3 +88,11 @@ def contains_any(text: str, forbidden_snippets: Sequence[str]) -> List[str]:
     opponent could read."""
     lowered = text.lower()
     return [snippet for snippet in forbidden_snippets if snippet.lower() in lowered]
+
+
+def sanitize_untrusted(text: str, limit: int = 150):
+    """Normalize controls/delimiters and return (safe data, suspicious flag)."""
+    normalized = unicodedata.normalize("NFKC", str(text))
+    normalized = "".join(ch for ch in normalized if ch >= " " or ch in "\n\t")[:limit]
+    normalized = normalized.replace("<<<", "< < <").replace(">>>", "> > >")
+    return normalized, scan_for_injection(normalized).is_suspicious

@@ -19,7 +19,6 @@ chain instead, which is what Section 5 actually asks for ("maintain a
 soft internal timeout... abort remaining attempts").
 """
 import logging
-import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -56,6 +55,7 @@ class ProviderProfile:
     max_complexity: ComplexityTier = ComplexityTier.HIGH
     per_minute_quota: Optional[int] = None
     per_day_quota: Optional[int] = None
+    timeout_cap_seconds: Optional[float] = None
 
     def suitable_for(self, complexity: ComplexityTier) -> bool:
         return self.min_complexity.value <= complexity.value <= self.max_complexity.value
@@ -99,8 +99,7 @@ class _ProviderHealth:
             _COOLDOWN_BASE_SECONDS * (2 ** max(0, self.consecutive_failures - 1)),
             _COOLDOWN_MAX_SECONDS,
         )
-        jitter = random.uniform(0, backoff * 0.2)
-        self.cooldown_until = now + backoff + jitter
+        self.cooldown_until = now + backoff
 
     def register_call_attempt(self, now: float) -> None:
         if now - self.minute_window_start >= _MINUTE_WINDOW_SECONDS:
@@ -120,6 +119,9 @@ class ModelRouter:
             raise ValueError("ModelRouter requires at least one ProviderProfile")
         self._profiles = profiles
         self._health: Dict[str, _ProviderHealth] = {p.profile_id: _ProviderHealth() for p in profiles}
+        self._provider_quota: Dict[str, _ProviderHealth] = {}
+        for profile in profiles:
+            self._provider_quota.setdefault(profile.provider_key, _ProviderHealth())
 
     def complete(
         self,
@@ -148,9 +150,10 @@ class ModelRouter:
                 )
                 break
 
-            call_timeout = min(remaining, per_call_cap_seconds)
+            call_timeout = min(remaining, profile.timeout_cap_seconds or per_call_cap_seconds)
             health = self._health[profile.profile_id]
             health.register_call_attempt(time.monotonic())
+            self._provider_quota[profile.provider_key].register_call_attempt(time.monotonic())
 
             try:
                 response = profile.client.complete(request, timeout=call_timeout)
@@ -212,7 +215,7 @@ class ModelRouter:
         return sorted(pool, key=lambda p: self._sort_key(p, now))
 
     def _has_quota_headroom(self, profile: ProviderProfile, now: float) -> bool:
-        health = self._health[profile.profile_id]
+        health = self._provider_quota[profile.provider_key]
         if profile.per_minute_quota is not None:
             window_age = now - health.minute_window_start
             count = 0 if window_age >= _MINUTE_WINDOW_SECONDS else health.minute_call_count
@@ -230,7 +233,7 @@ class ModelRouter:
         cooling = 1 if health.is_cooling_down(now) else 0
         avg_latency = health.average_latency()
         latency_score = avg_latency if avg_latency is not None else 0.0
-        return (cooling, latency_score, profile.base_priority)
+        return (cooling, float(profile.base_priority), int(latency_score * 1000))
 
     def health_snapshot(self) -> Dict[str, Dict[str, object]]:
         """For logging/debugging/audit — not consulted by the routing
@@ -259,101 +262,44 @@ def build_default_router(settings: Settings) -> "ModelRouter":
     """
     from agent.providers.gemini_client import GeminiClient
     from agent.providers.groq_client import GroqClient
-    from agent.providers.mistral_client import MistralClient
-    from agent.providers.openrouter_client import OpenRouterClient
-
     profiles: List[ProviderProfile] = []
 
-    if settings.groq_api_key:
+    order = [settings.primary_llm_provider, settings.fallback_llm_provider]
+    if "groq" in order and settings.groq_api_key:
         profiles.append(
             ProviderProfile(
                 profile_id="groq",
                 provider_key="groq",
                 client=GroqClient(api_key=settings.groq_api_key, model=settings.groq_model),
                 model=settings.groq_model,
-                base_priority=10,
+                base_priority=order.index("groq") * 10,
                 per_minute_quota=settings.quota_ceilings["groq"].per_minute,
                 per_day_quota=settings.quota_ceilings["groq"].per_day,
+                timeout_cap_seconds=settings.groq_timeout_seconds,
             )
         )
     else:
         logger.info("model_router.provider_skipped_no_key", extra={"provider": "groq"})
 
-    if settings.gemini_api_key:
+    if "gemini" in order and settings.gemini_api_key:
         profiles.append(
             ProviderProfile(
                 profile_id="gemini_flash",
                 provider_key="gemini",
                 client=GeminiClient(
                     api_key=settings.gemini_api_key,
-                    model=settings.gemini_flash_model,
-                    provider_id="gemini_flash",
+                    model=settings.gemini_model,
+                    provider_id="gemini",
                 ),
-                model=settings.gemini_flash_model,
-                base_priority=20,
+                model=settings.gemini_model,
+                base_priority=order.index("gemini") * 10,
                 per_minute_quota=settings.quota_ceilings["gemini"].per_minute,
                 per_day_quota=settings.quota_ceilings["gemini"].per_day,
-            )
-        )
-        profiles.append(
-            ProviderProfile(
-                profile_id="gemini_pro",
-                provider_key="gemini",
-                client=GeminiClient(
-                    api_key=settings.gemini_api_key,
-                    model=settings.gemini_pro_model,
-                    provider_id="gemini_pro",
-                ),
-                model=settings.gemini_pro_model,
-                base_priority=30,
-                min_complexity=ComplexityTier.HIGH,
-                max_complexity=ComplexityTier.HIGH,
-                per_minute_quota=settings.quota_ceilings["gemini"].per_minute,
-                per_day_quota=settings.quota_ceilings["gemini"].per_day,
+                timeout_cap_seconds=settings.gemini_timeout_seconds,
             )
         )
     else:
         logger.info("model_router.provider_skipped_no_key", extra={"provider": "gemini"})
-
-    if settings.mistral_api_key:
-        profiles.append(
-            ProviderProfile(
-                profile_id="mistral",
-                provider_key="mistral",
-                client=MistralClient(api_key=settings.mistral_api_key, model=settings.mistral_model),
-                model=settings.mistral_model,
-                base_priority=40,
-                per_minute_quota=settings.quota_ceilings["mistral"].per_minute,
-                per_day_quota=settings.quota_ceilings["mistral"].per_day,
-            )
-        )
-    else:
-        logger.info("model_router.provider_skipped_no_key", extra={"provider": "mistral"})
-
-    if settings.openrouter_api_key and settings.openrouter_model:
-        profiles.append(
-            ProviderProfile(
-                profile_id="openrouter",
-                provider_key="openrouter",
-                client=OpenRouterClient(
-                    api_key=settings.openrouter_api_key,
-                    model=settings.openrouter_model,
-                    site_url=settings.openrouter_referer,
-                    site_name=settings.openrouter_title,
-                ),
-                model=settings.openrouter_model,
-                base_priority=50,
-                per_minute_quota=settings.quota_ceilings["openrouter"].per_minute,
-                per_day_quota=settings.quota_ceilings["openrouter"].per_day,
-            )
-        )
-    elif settings.openrouter_api_key and not settings.openrouter_model:
-        logger.warning(
-            "model_router.openrouter_key_without_model",
-            extra={"hint": "set OPENROUTER_MODEL in .env — see .env.example"},
-        )
-    else:
-        logger.info("model_router.provider_skipped_no_key", extra={"provider": "openrouter"})
 
     if not profiles:
         raise ValueError(

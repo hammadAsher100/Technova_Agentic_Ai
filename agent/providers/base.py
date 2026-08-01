@@ -46,6 +46,8 @@ class LLMRequest:
     # Not consumed by the generic routing logic yet — a documented hook
     # for Phase 1 refinement rather than unused speculative plumbing.
     metadata: Dict[str, Any] = field(default_factory=dict)
+    response_schema: Optional[Dict[str, Any]] = None
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -1,83 +1,31 @@
-"""Centralized, environment-driven configuration.
-
-Every rule-governed or environment-specific parameter (REG-10, REG-03)
-lives here — nowhere else in the codebase should read os.environ
-directly or hardcode a timeout / quota / model-name constant.
-
-Loads `.env` via a small hand-rolled parser rather than `python-dotenv`.
-This is a deliberate consequence of the Phase 0 dependency decision
-documented in docs/ARCHITECTURE.md ("Dependency strategy"): the agent's
-runtime has zero third-party dependencies so a Python-3.9 `pip install`
-can never fail on the judges' machine. `.env` parsing is ~15 lines of
-stdlib code, so hand-rolling it here was a clear win regardless of
-whether python-dotenv itself would have been 3.9-safe.
-"""
-import logging
+"""Central, secret-safe environment configuration for Trust Arena."""
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-logger = logging.getLogger(__name__)
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_ENV_FILE = _PROJECT_ROOT / ".env"
+_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _load_dotenv(path: Path) -> None:
-    """KEY=VALUE per line, '#' comments, optional quoting. Existing
-    environment variables always win over the file, matching
-    python-dotenv's default (non-override) behavior."""
-    if not path.exists():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
+def _load() -> None:
+    path = _ROOT / ".env"
+    if not path.exists(): return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            value = value.strip().strip("'\"")
+            os.environ.setdefault(key.strip(), value)
+_load()
 
 
-_load_dotenv(_ENV_FILE)
+def _s(name: str, default: Optional[str] = None) -> Optional[str]:
+    return os.environ.get(name, "").strip() or default
 
 
-def _env_str(name: str, default: Optional[str] = None) -> Optional[str]:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    return raw.strip()
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("settings.invalid_float_env", extra={"name": name, "value": raw})
-        return default
-
-
-def _env_int_optional(name: str) -> Optional[int]:
-    """Unlike _env_float above, this has no numeric default — quota
-    ceilings are deliberately None (not locally enforced) unless the
-    team fills them in from their own provider dashboards. See
-    .env.example: free-tier limits vary by model and change over time,
-    so no specific number is assumed here."""
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("settings.invalid_int_env", extra={"name": name, "value": raw})
-        return None
+def _f(name: str, default: float) -> float:
+    try: return float(_s(name, str(default)))
+    except (TypeError, ValueError): return default
 
 
 @dataclass(frozen=True)
@@ -88,91 +36,56 @@ class QuotaCeiling:
 
 @dataclass(frozen=True)
 class Settings:
-    # --- Competition-mandated timing (REG-06: 25s hard limit/round) ---
-    hard_deadline_seconds: float
-    soft_deadline_seconds: float
-    per_call_cap_seconds: float
-
-    # --- API keys (never logged raw — see config/logging_config.py redact()) ---
+    server_url: Optional[str]
+    team_id: Optional[str]
+    team_token: Optional[str]
+    primary_llm_provider: str
+    fallback_llm_provider: str
     groq_api_key: Optional[str]
     gemini_api_key: Optional[str]
-    mistral_api_key: Optional[str]
-    openrouter_api_key: Optional[str]
-
-    # --- Model selection (Section 5 defaults; override via .env) ---
     groq_model: str
-    gemini_flash_model: str
-    gemini_pro_model: str
-    mistral_model: str
-    openrouter_model: Optional[str]
-    openrouter_referer: Optional[str]
-    openrouter_title: Optional[str]
-
-    # --- Free-tier quota ceilings (Section 8); None = not locally enforced ---
+    gemini_model: str
+    hard_deadline_seconds: float
+    turn_budget_seconds: float
+    submission_reserve_seconds: float
+    groq_timeout_seconds: float
+    gemini_timeout_seconds: float
+    poll_interval_seconds: float
+    total_rounds: int
+    log_level: str
+    log_format: str
     quota_ceilings: Dict[str, QuotaCeiling]
 
-    # --- Logging ---
-    log_level: str
-    log_format: str  # "plain" | "json"
-
-    def configured_providers(self) -> List[str]:
-        """Provider keys that have a non-empty API key configured."""
-        mapping = {
-            "groq": self.groq_api_key,
-            "gemini": self.gemini_api_key,
-            "mistral": self.mistral_api_key,
-            "openrouter": self.openrouter_api_key,
-        }
-        return [name for name, key in mapping.items() if key]
+    def validate_startup(self) -> None:
+        missing = []
+        if not self.server_url: missing.append("SERVER_URL")
+        if not self.team_id: missing.append("TEAM_ID")
+        if not self.team_token: missing.append("TEAM_TOKEN")
+        key = self.groq_api_key if self.primary_llm_provider == "groq" else self.gemini_api_key
+        if not key: missing.append(self.primary_llm_provider.upper() + "_API_KEY")
+        if self.primary_llm_provider == self.fallback_llm_provider:
+            raise ValueError("PRIMARY_LLM_PROVIDER and FALLBACK_LLM_PROVIDER must differ")
+        if missing: raise ValueError("Missing required environment configuration: " + ", ".join(missing))
 
 
-_settings_singleton: Optional[Settings] = None
-
-
+_settings: Optional[Settings] = None
 def get_settings(force_reload: bool = False) -> Settings:
-    """Process-wide Settings singleton.
-
-    `force_reload=True` exists for tests that mutate os.environ and
-    need to re-read it; production code should never need it.
-    """
-    global _settings_singleton
-    if _settings_singleton is not None and not force_reload:
-        return _settings_singleton
-
-    _settings_singleton = Settings(
-        hard_deadline_seconds=_env_float("HARD_DEADLINE_SECONDS", 25.0),
-        soft_deadline_seconds=_env_float("SOFT_DEADLINE_SECONDS", 13.0),
-        per_call_cap_seconds=_env_float("PER_CALL_CAP_SECONDS", 8.0),
-        groq_api_key=_env_str("GROQ_API_KEY"),
-        gemini_api_key=_env_str("GEMINI_API_KEY") or _env_str("GOOGLE_API_KEY"),
-        mistral_api_key=_env_str("MISTRAL_API_KEY"),
-        openrouter_api_key=_env_str("OPENROUTER_API_KEY"),
-        groq_model=_env_str("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        gemini_flash_model=_env_str("GEMINI_FLASH_MODEL", "gemini-2.5-flash"),
-        gemini_pro_model=_env_str("GEMINI_PRO_MODEL", "gemini-2.5-pro"),
-        mistral_model=_env_str("MISTRAL_MODEL", "mistral-large-latest"),
-        openrouter_model=_env_str("OPENROUTER_MODEL"),
-        openrouter_referer=_env_str("OPENROUTER_SITE_URL"),
-        openrouter_title=_env_str("OPENROUTER_SITE_NAME"),
-        quota_ceilings={
-            "groq": QuotaCeiling(
-                per_minute=_env_int_optional("GROQ_RPM_CEILING"),
-                per_day=_env_int_optional("GROQ_RPD_CEILING"),
-            ),
-            "gemini": QuotaCeiling(
-                per_minute=_env_int_optional("GEMINI_RPM_CEILING"),
-                per_day=_env_int_optional("GEMINI_RPD_CEILING"),
-            ),
-            "mistral": QuotaCeiling(
-                per_minute=_env_int_optional("MISTRAL_RPM_CEILING"),
-                per_day=_env_int_optional("MISTRAL_RPD_CEILING"),
-            ),
-            "openrouter": QuotaCeiling(
-                per_minute=_env_int_optional("OPENROUTER_RPM_CEILING"),
-                per_day=_env_int_optional("OPENROUTER_RPD_CEILING"),
-            ),
-        },
-        log_level=_env_str("LOG_LEVEL", "INFO"),
-        log_format=_env_str("LOG_FORMAT", "plain"),
-    )
-    return _settings_singleton
+    global _settings
+    if _settings and not force_reload: return _settings
+    primary = (_s("PRIMARY_LLM_PROVIDER", "groq") or "groq").lower()
+    fallback = (_s("FALLBACK_LLM_PROVIDER", "gemini") or "gemini").lower()
+    if primary not in ("groq", "gemini") or fallback not in ("groq", "gemini"):
+        raise ValueError("Supported providers are groq and gemini")
+    _settings = Settings(
+        server_url=_s("SERVER_URL"), team_id=_s("TEAM_ID"), team_token=_s("TEAM_TOKEN"),
+        primary_llm_provider=primary, fallback_llm_provider=fallback,
+        groq_api_key=_s("GROQ_API_KEY"), gemini_api_key=_s("GEMINI_API_KEY") or _s("GOOGLE_API_KEY"),
+        groq_model=_s("GROQ_MODEL", "openai/gpt-oss-120b") or "openai/gpt-oss-120b",
+        gemini_model=_s("GEMINI_MODEL", "gemini-3.6-flash") or "gemini-3.6-flash",
+        hard_deadline_seconds=_f("HARD_DEADLINE_SECONDS", 25), turn_budget_seconds=_f("TURN_BUDGET_SECONDS", 22),
+        submission_reserve_seconds=_f("SUBMISSION_RESERVE_SECONDS", 5), groq_timeout_seconds=_f("GROQ_TIMEOUT_SECONDS", 8),
+        gemini_timeout_seconds=_f("GEMINI_TIMEOUT_SECONDS", 5), poll_interval_seconds=_f("POLL_INTERVAL", 1),
+        total_rounds=int(_f("TOTAL_ROUNDS", 7)), log_level=_s("LOG_LEVEL", "INFO") or "INFO",
+        log_format=_s("LOG_FORMAT", "plain") or "plain",
+        quota_ceilings={"groq": QuotaCeiling(), "gemini": QuotaCeiling()})
+    return _settings

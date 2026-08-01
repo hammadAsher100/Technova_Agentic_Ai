@@ -55,6 +55,9 @@ class GeminiClient(BaseProviderClient):
                 "temperature": request.temperature,
             },
         }
+        if request.response_schema:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
+            payload["generationConfig"]["responseJsonSchema"] = request.response_schema
         if request.system_prompt:
             payload["systemInstruction"] = {"parts": [{"text": request.system_prompt}]}
         return payload

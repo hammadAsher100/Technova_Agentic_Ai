@@ -22,12 +22,18 @@ def _build_payload(request: LLMRequest, model: str) -> Dict[str, Any]:
         messages.append({"role": "system", "content": request.system_prompt})
     for msg in request.messages:
         messages.append({"role": msg.role, "content": msg.content})
-    return {
+    payload = {
         "model": model,
         "messages": messages,
         "max_tokens": request.max_tokens,
         "temperature": request.temperature,
     }
+    if request.response_schema:
+        payload["response_format"] = {"type": "json_schema", "json_schema": {
+            "name": "trust_arena_decision", "strict": True, "schema": request.response_schema}}
+    if request.reasoning_effort:
+        payload["reasoning_effort"] = request.reasoning_effort
+    return payload
 
 
 def _parse_response(
