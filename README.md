@@ -10,7 +10,7 @@ The final competition build is designed as a **single standalone `agent.py` file
 - A local deterministic fallback when Groq is unavailable, slow, rate-limited, or returns invalid output
 - Strict output validation, prompt-injection defence, deadline control, and idempotent resubmission
 
-> **Verification status:** Final hardening and isolated single-file verification should be completed before marking the project as competition-ready.
+> **Verification status:** The standalone file, deterministic simulations, safety tests, and isolated import pass locally. Practice-server validation is still required before competition use.
 
 ---
 
@@ -455,6 +455,16 @@ Groq is skipped when calling it would threaten the submission reserve.
 
 ---
 
+## Logging and observability
+
+Logging is implemented entirely inside `agent.py`. JSON Lines is the default; plain key-value output is available for quick terminal debugging. `LOG_DETAIL=minimal` keeps only lifecycle and submission events, `normal` includes strategy/Groq stages, and `debug` also includes polling diagnostics. `LOG_FILE` optionally duplicates the same secret-filtered events to a file.
+
+Logs contain safe identifiers and metrics only. Tokens, API keys, headers, prompts, model output, reasoning, full history, and opponent message content are never logged. If a configured secret reaches a future logging call accidentally, the complete record is replaced by `log.suppressed`.
+
+Important events include `turn.received`, `turn.cache_hit`, `history.normalized`, `strategy.profile_built`, `strategy.rollout_completed`, `strategy.recommended`, Groq outcome events, `fallback.deterministic_used`, `decision.completed`, and submission outcome events.
+
+---
+
 # Score Forecast
 
 ## Important interpretation
@@ -552,22 +562,49 @@ The raw theoretical ceiling across three matches is 105, but that is impossible 
 
 This is a much more meaningful performance measure than comparing the agent with 105.
 
-## Behaviour-only classification forecasts
+## Measured behaviour-only simulations
 
-When identities are hidden and the agent must learn from behaviour, early-round uncertainty creates classification cost.
+These deterministic results run the actual `TrustArenaAgent.decide` pipeline with a schema-valid fake Groq client and no network calls. “Regret” is measured against an exhaustive best seven-move sequence for that simulator.
 
-| Behaviour | Probable score range | Main source of regret |
-|---|---:|---|
-| Unknown Pacifist | **27–35** | Initial cooperation while gathering evidence |
-| Unknown Predator | **7–11** | Possible first-round cooperation before defensive switching |
-| Unknown Mirror | **18–23** | Avoiding accidental retaliation while confirming reciprocity |
-| Grim Trigger | **18–23** | Cost of any premature betrayal |
-| Generous Tit for Tat | **18–23** | Balancing retaliation with repair |
-| Alternator | **17–23** | Time required to identify the sequence |
-| Delayed endgame betrayer | **15–24** | Trust built before late betrayal is detected |
-| Random, 50% cooperation | Expected around **21** | Irreducible randomness |
+### Canonical probe mode
 
-These ranges must be replaced by measured simulation results after the final standalone agent is implemented.
+| Opponent | Our moves | Score | Regret | Groq calls |
+|---|---|---:|---:|---:|
+| Hidden Pacifist | `CDCDDDD` | **31** | 4 | 0 |
+| Hidden Predator | `CDDDDDD` | **6** | 1 | 0 |
+| Hidden Mirror | `CDCCCCD` | **22** | 1 | 0 |
+| Generous Tit for Tat | `CDCCCCD` | 22 | 5 | 0 |
+| Grim Trigger | `CDCCDDD` | 11 | 12 | 0 |
+| Win-Stay Lose-Shift | `CDCCDDD` | 15 | 8 | 0 |
+| Alternator | `CDCDDDD` | 19 | 4 | 0 |
+| Seeded random | `CDCDDDD` | 19 | 4 | 2 |
+| Late betrayer | `CDCDDDD` | 23 | 4 | 0 |
+| Repeated exploiter | `CDDDDDD` | 6 | 1 | 0 |
+| Returning Mirror fixture | `CDCCCCD` | 22 | 1 | 0 |
+| PHANTOM seeded random | `CCCCDCD` | 15 | 8 | 4 |
+
+The complete 15-fixture canonical suite averages **19.07**, with a worst score of **6** and best score of **31**. The required hidden canonical trio totals **59/65**, or approximately **90.8%** of its opponent-conditioned perfect-information maximum.
+
+### Conservative probe mode
+
+| Opponent | Our moves | Score | Regret | Groq calls |
+|---|---|---:|---:|---:|
+| Hidden Pacifist | `CCCCCCD` | 23 | 12 | 5 |
+| Hidden Predator | `CDDDDDD` | **6** | 1 | 0 |
+| Hidden Mirror | `CCCCCCD` | **23** | 0 | 5 |
+| Generous Tit for Tat | `CCCCCCD` | 23 | 4 | 5 |
+| Grim Trigger | `CCCCCCD` | **23** | 0 | 5 |
+| Win-Stay Lose-Shift | `CCCCCCD` | 23 | 0 | 5 |
+| Alternator | `CCDDDDD` | 20 | 3 | 1 |
+| Seeded random | `CCCCDCD` | 15 | 8 | 4 |
+| Late betrayer | `CCCCCCD` | 16 | 11 | 5 |
+| Repeated exploiter | `CDDDDDD` | 6 | 1 | 0 |
+| Returning Mirror fixture | `CCCCCCD` | 23 | 0 | 5 |
+| PHANTOM seeded random | `CCCCDCD` | 15 | 8 | 4 |
+
+The complete 15-fixture conservative suite averages **19.00**. It protects Grim Trigger and reciprocal agents but gives up early Pacifist exploitation.
+
+Canonical mode cooperates in round one, probes with defection in round two after observed cooperation, cooperates in round three to expose the delayed response, and branches in round four. Pacifist, Mirror, and Grim Trigger are indistinguishable before probing; the canonical Grim Trigger score of 11 is therefore the explicit cost of achieving the hidden `31/6/22` target trio. Conservative mode disables this probe, and PHANTOM always uses conservative behavior.
 
 ## Random opponent benchmark
 
@@ -640,10 +677,16 @@ GROQ_TIMEOUT_SECONDS=8
 POLL_INTERVAL=1.0
 PRACTICE_MODE=False
 TOTAL_ROUNDS=7
+UNKNOWN_PROBE_MODE=canonical
 LOG_LEVEL=INFO
+LOG_FORMAT=json
+LOG_DETAIL=normal
+LOG_FILE=
 ```
 
 Set `PRACTICE_MODE=True` before launching the agent for portal practice matches. This starts polling `/practice/my-turn` immediately; use `False` for the live event endpoint.
+
+`UNKNOWN_PROBE_MODE=canonical` enables the round-two Pacifist/Mirror identification probe and is the default. Use `conservative` when Grim Trigger and arbitrary reciprocal agents are more likely. Both modes still retaliate immediately after an unprovoked defection, lock defensively after two defections, and defect on the final round when no future cost is evidenced.
 
 ### Secret rules
 
@@ -737,19 +780,14 @@ Technova_Agentic_Ai/
 ├── README.md
 ├── .env.example
 ├── .gitignore
-├── requirements.txt      # Only if a runtime dependency is truly needed
+├── requirements-dev.txt  # Test tooling only; runtime uses the Python standard library
 │
 └── tests/                # Verification only; not required by the runtime
-    ├── test_protocol.py
-    ├── test_strategy.py
-    ├── test_history.py
-    ├── test_groq.py
-    ├── test_safety.py
-    ├── test_deadline.py
-    └── test_simulations.py
+    ├── test_standalone_agent.py
+    └── test_standalone_simulations.py
 ```
 
-The final `agent.py` must not import local project modules.
+The final `agent.py` imports no local project modules and requires no runtime package installation.
 
 ---
 
