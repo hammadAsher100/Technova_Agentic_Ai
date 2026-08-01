@@ -638,9 +638,12 @@ TURN_BUDGET_SECONDS=22
 SUBMISSION_RESERVE_SECONDS=5
 GROQ_TIMEOUT_SECONDS=8
 POLL_INTERVAL=1.0
+PRACTICE_MODE=False
 TOTAL_ROUNDS=7
 LOG_LEVEL=INFO
 ```
+
+Set `PRACTICE_MODE=True` before launching the agent for portal practice matches. This starts polling `/practice/my-turn` immediately; use `False` for the live event endpoint.
 
 ### Secret rules
 

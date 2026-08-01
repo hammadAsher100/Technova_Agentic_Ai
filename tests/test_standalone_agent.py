@@ -47,6 +47,12 @@ def test_settings_env_and_validation(monkeypatch,tmp_path):
     assert configured.groq_model=="openai/gpt-oss-120b"
 
 
+def test_practice_mode_environment(monkeypatch):
+    monkeypatch.setenv("PRACTICE_MODE","True"); assert agent.Settings.from_env().practice_mode is True
+    monkeypatch.setenv("PRACTICE_MODE","invalid")
+    with pytest.raises(ValueError): agent.Settings.from_env()
+
+
 @pytest.mark.parametrize("changes",[{"server_url":None},{"hard_deadline_seconds":0},{"turn_budget_seconds":25},
     {"submission_reserve_seconds":22},{"groq_timeout_seconds":18},{"poll_interval_seconds":.5},{"total_rounds":0}])
 def test_invalid_settings(changes):

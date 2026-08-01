@@ -46,11 +46,14 @@ STRATEGIES = frozenset(("trust_building", "defensive_defection", "controlled_exp
 def _load_dotenv(path: Optional[Path] = None) -> None:
     target = path or (Path(__file__).resolve().parent / ".env")
     if not target.exists(): return
+    file_values: Dict[str, str] = {}
     for raw in target.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+            file_values[key.strip()] = value.strip().strip("'\"")
+    for key, value in file_values.items():
+        os.environ.setdefault(key, value)
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -61,6 +64,13 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
 def _env_float(name: str, default: float) -> float:
     try: return float(_env(name, str(default)))
     except (TypeError, ValueError): return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = (_env(name, "true" if default else "false") or "false").lower()
+    if value in ("1", "true", "yes", "on"): return True
+    if value in ("0", "false", "no", "off"): return False
+    raise ValueError(name + " must be true or false")
 
 
 @dataclass(frozen=True)
@@ -77,6 +87,7 @@ class Settings:
     poll_interval_seconds: float = 1.0
     total_rounds: int = 7
     log_level: str = "INFO"
+    practice_mode: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -86,7 +97,7 @@ class Settings:
                    _env_float("HARD_DEADLINE_SECONDS", 25), _env_float("TURN_BUDGET_SECONDS", 22),
                    _env_float("SUBMISSION_RESERVE_SECONDS", 5), _env_float("GROQ_TIMEOUT_SECONDS", 8),
                    _env_float("POLL_INTERVAL", 1), int(_env_float("TOTAL_ROUNDS", 7)),
-                   _env("LOG_LEVEL", "INFO") or "INFO")
+                   _env("LOG_LEVEL", "INFO") or "INFO", _env_bool("PRACTICE_MODE", False))
 
     def validate(self) -> None:
         missing = [name for name, value in (("SERVER_URL", self.server_url), ("TEAM_ID", self.team_id),
@@ -629,7 +640,7 @@ def poll_once(settings: Settings, agent: TrustArenaAgent, practice: bool = False
 def main() -> None:
     settings = Settings.from_env(); settings.validate(); setup_logging(settings.log_level)
     logger.info("Standalone agent starting")
-    agent = TrustArenaAgent(settings); practice = False
+    agent = TrustArenaAgent(settings); practice = settings.practice_mode
     while True:
         try:
             practice, delay, status, accepted, _ = poll_once(settings, agent, practice)
